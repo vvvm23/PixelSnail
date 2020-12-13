@@ -5,12 +5,11 @@ import torchvision
 from tqdm import tqdm
 
 import time
-import copy
-import argparse
 
 from model import PixelSnail
 
 TRY_CUDA = True
+MODEL_SAVING = True
 NB_EPOCHS = 200
 BATCH_SIZE = 32
 
@@ -32,6 +31,8 @@ if __name__ == "__main__":
     optim = torch.optim.Adam(model.parameters(), lr=0.001)
     crit = nn.CrossEntropyLoss()
 
+    save_id = int(time.time())
+
     for ei in range(NB_EPOCHS):
         print(f"\n> Epoch {ei+1}/{NB_EPOCHS}")
         train_loss = 0.0
@@ -51,7 +52,7 @@ if __name__ == "__main__":
 
         model.eval()
         with torch.no_grad():
-            for x, _ in tqdm(test_loader):
+            for i, (x, _) in enumerate(tqdm(test_loader)):
                 optim.zero_grad()
                 x = (x*255).long().squeeze().to(device)
 
@@ -59,6 +60,9 @@ if __name__ == "__main__":
                 loss = crit(pred.view(BATCH_SIZE, 256, -1), x.view(BATCH_SIZE, -1))
                 eval_loss += loss.item()
 
+                if i == 0:
+                    img = torch.cat([x, torch.argmax(pred, dim=1)], dim=0) / 255.
+                    torchvision.utils.save_image(img.unsqueeze(1), f"imgs/pixelcnn-{ei}.png")
+        torch.save(model.state_dict(), f"checkpoints/{save_id}-{ei}-pixelcnn.pt")
         print(f"> Training Loss: {train_loss / len(train_loader)}")
         print(f"> Evaluation Loss: {eval_loss / len(test_loader)}")
-
