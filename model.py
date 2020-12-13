@@ -18,12 +18,15 @@ class CausalConv2d(nn.Module):
     def __init__(self, in_channel, out_channel, kernel_size, stride=1, padding='downright'):
         super().__init__()
         assert padding in ['downright', 'down', 'causal'], "Invalid padding argument [downright, down, causal]"
-        if padding == 'downright':
-            pad = [kernel_size - 1, 0, kernel_size - 1, 0]
-        elif padding in ['down', 'causal']:
-            pad = [kernel_size // 2, kernel_size // 2, kernel_size - 1, 0]
+        if isinstance(kernel_size, int):
+            kernel_size = [kernel_size, kernel_size]
 
-        self.causal = kernel_size // 2 if padding == 'causal' else 0
+        if padding == 'downright':
+            pad = [kernel_size[1] - 1, 0, kernel_size[0] - 1, 0]
+        elif padding in ['down', 'causal']:
+            pad = [kernel_size[1] // 2, kernel_size[1] // 2, kernel_size[0] - 1, 0]
+
+        self.causal = kernel_size[1] // 2 if padding == 'causal' else 0
         self.pad = nn.ZeroPad2d(pad)
         self.conv = WNConv2d(in_channel, out_channel, kernel_size, stride=stride)
 
@@ -148,16 +151,67 @@ class PixelBlock(nn.Module):
         return y
 
 class PixelSnail(nn.Module):
-    def __init__(self):
+    def __init__(self, shape, nb_class, channel, kernel_size, nb_pixel_block, nb_res_block, res_channel, dropout=0.1, nb_cond_res_block=0, cond_res_channel=0, cond_res_kernel=3, nb_out_res_block=0):
         super().__init__()
+        height, width = shape
+        self.nb_class = nb_class
 
-    def forward(self, x):
-        return x
+        assert kernel_size % 2, "Kernel size must be odd"
+
+        self.horz_conv = CausalConv2d(nb_class, channel, [kernel_size // 2, kernel_size], padding='down')
+        self.vert_conv = CausalConv2d(nb_class, channel, [(kernel_size+1) // 2, kernel_size // 2], padding='downright')
+
+        coord_x = (torch.arange(height).float() - height / 2) / height
+        coord_x = coord_x.view(1, 1, height, 1).expand(1, 1, height, width)
+        coord_y = (torch.arange(width).float() - width / 2) / width
+        coord_y = coord_y.view(1, 1, 1, width).expand(1, 1, height, width)
+        self.register_buffer('bg', torch.cat([coord_x, coord_y], 1))
+
+        self.blks = nn.ModuleList([PixelBlock(channel, res_channel, kernel_size, nb_res_block, dropout=dropout, condition_dim=cond_res_channel) for _ in range(nb_pixel_block)])
+        
+        if nb_cond_res_block > 0:
+            pass
+
+        out = []
+        for _ in range(nb_out_res_block):
+            out.append(GatedResBlock(channel, res_channel, 1))
+        out.append(nn.ELU(inplace=True))
+        out.append(WNConv2d(channel, nb_class, 1))
+
+        self.out = nn.Sequential(*out)
+
+        self.shift_down = lambda x, size=1: F.pad(x, [0,0,size,0])[:, :, :x.shape[2], :]
+        self.shift_right = lambda x, size=1: F.pad(x, [size,0,0,0])[:, :, :, :x.shape[3]]
+
+    # cache is used to increase speed of sampling
+    def forward(self, x, c=None, cache=None):
+        if cache is None:
+            cache = {}
+        batch, height, width = x.shape
+        x = F.one_hot(x, self.nb_class).permute(0, 3, 1, 2).type_as(self.bg)
+        
+        horz = self.shift_down(self.horz_conv(x))
+        vert = self.shift_right(self.vert_conv(x))
+        y = horz + vert
+
+        bg = self.bg[:, :, :height, :].expand(batch, 2, height, width)
+
+        if c != None:
+            if 'c' in cache:
+                c = cache['c']
+                c = c[:, :, :height, :]
+            else:
+                c = F.one_hot(c, self.nb_class).permute(0,3,1,2).type_as(self.bg)
+                c = self.cond_net(c)
+                c = F.interpolate(c, scale_factor=2) # TODO: Could have some tranposed Conv2d instead
+                cache['condition'] = c.detach().clone()
+                c = c[:, :, :height, :]
+
+        for blk in self.blks:
+            y = blk(y, bg, c=c)
+        y = self.out(y)
+        return y, cache
 
 if __name__ == "__main__":
-    pb = PixelBlock(16, 32, 7, 5, condition_dim=1)
-    x = torch.randn(8,16,24,24)
-    bg = torch.randn(8,2,24,24)
-    c = torch.randn(8,1,24,24)
-
-    print(pb(x,bg,c).shape)
+    ps = PixelSnail([24, 24], 512, 64, 7, 7, 2, 32, cond_res_channel=32, nb_out_res_block=5)
+    print(ps)
