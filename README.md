@@ -11,4 +11,6 @@ PyTorch implementation of PixelSnail, an auto-regressive, generative model.
       archivePrefix={arXiv},
       primaryClass={cs.LG}
 }
+
+https://github.com/rosinality/vq-vae-2-pytorch/blob/master/pixelsnail.py
 ```
