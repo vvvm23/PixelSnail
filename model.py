@@ -35,7 +35,7 @@ class CausalConv2d(nn.Module):
         return x
 
 class GatedResBlock(nn.Module):
-    def __init__(self, in_channel, channel, kernel_size, conv='wnconv2d', dropout=0.1, condition_dim=0):
+    def __init__(self, in_channel, channel, kernel_size, conv='wnconv2d', dropout=0.1, condition_dim=0, aux_channels=0):
         super().__init__()
 
         assert conv in ['wnconv2d', 'causal_downright', 'causal'], "Invalid conv argument [wnconv2d, causal_downright, causal]"
@@ -51,12 +51,20 @@ class GatedResBlock(nn.Module):
         self.conv2 = conv_builder(channel, in_channel*2, kernel_size)
         self.drop1 = nn.Dropout(dropout)
 
+        if aux_channels > 0:
+            self.aux_conv = WNConv2d(aux_channels, channel, 1)
+
         if condition_dim > 0:
             self.convc = WNConv2d(condition_dim, in_channel*2, 1, bias=False)
         self.gate = nn.GLU(1) # 0 -> 1 === ReZero -> Residual
 
-    def forward(self, x, c=None):
-        y = F.elu(self.conv1(F.elu(x)))
+    def forward(self, x, a=None, c=None):
+        y = self.conv1(F.elu(x))
+
+        if a != None:
+            y = y + self.aux_conv(F.elu(a))
+        y = F.elu(y)
+
         y = self.drop1(y)
         y = self.conv2(y)
 
@@ -65,6 +73,7 @@ class GatedResBlock(nn.Module):
         y = self.gate(y) + x
         return y
 
+# TODO: Potentially add some linear attention if time allows
 class CausalAttention(nn.Module):
     def __init__(self, q_channel, k_channel, channel, nb_head=8, dropout=0.1):
         super().__init__()
@@ -117,11 +126,26 @@ def causal_mask(size):
     )
 
 class PixelBlock(nn.Module):
-    def __init__(self):
+    def __init__(self, in_channel, channel, kernel_size, nb_res_blocks, dropout=0.1, condition_dim=0):
         super().__init__()
+        self.res_blks = nn.ModuleList([GatedResBlock(in_channel, channel, kernel_size, conv='causal', dropout=dropout, condition_dim=condition_dim) for _ in range(nb_res_blocks)])
+        self.k_blk = GatedResBlock(in_channel*2 + 2, in_channel, 1, dropout=dropout)
+        self.q_blk = GatedResBlock(in_channel + 2, in_channel, 1, dropout=dropout)
 
-    def forward(self, x):
-        return x
+        self.attn = CausalAttention(in_channel + 2, in_channel*2 + 2, in_channel // 2, dropout=dropout)
+
+        self.out_blk = GatedResBlock(in_channel, in_channel, 1, dropout=dropout, aux_channels=in_channel // 2)
+
+    def forward(self, x, bg, c=None):
+        y = x
+        for blk in self.res_blks:
+            y = blk(y, c=c)
+
+        k = self.k_blk(torch.cat([x, y, bg], 1))
+        q = self.q_blk(torch.cat([y, bg], 1))
+        y = self.out_blk(y, a=self.attn(q, k))
+
+        return y
 
 class PixelSnail(nn.Module):
     def __init__(self):
@@ -131,7 +155,9 @@ class PixelSnail(nn.Module):
         return x
 
 if __name__ == "__main__":
-    attn = CausalAttention(3, 3, 8)
-    q = torch.randn(1, 3, 8, 8)
-    k = torch.randn(1, 3, 8, 8)
-    print(attn(q, k).shape)
+    pb = PixelBlock(16, 32, 7, 5, condition_dim=1)
+    x = torch.randn(8,16,24,24)
+    bg = torch.randn(8,2,24,24)
+    c = torch.randn(8,1,24,24)
+
+    print(pb(x,bg,c).shape)
