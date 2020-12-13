@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from functools import lru_cache, partial
+import math
 
 # Inherits directly from nn.Conv2d and immediately normalises weights
 # TODO: May be worth trying kaiming normal or something
@@ -65,11 +66,55 @@ class GatedResBlock(nn.Module):
         return y
 
 class CausalAttention(nn.Module):
-    def __init__(self):
+    def __init__(self, q_channel, k_channel, channel, nb_head=8, dropout=0.1):
         super().__init__()
+        self.fc_query = nn.utils.weight_norm(nn.Linear(q_channel, channel))
+        self.fc_key = nn.utils.weight_norm(nn.Linear(k_channel, channel))
+        self.fc_value = nn.utils.weight_norm(nn.Linear(k_channel, channel))
+        self.head_dim = channel // nb_head
+        self.nb_head = nb_head
 
-    def forward(self, x):
-        return x
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, q, k):
+        batch_size, _, height, width = k.shape
+        reshape = lambda x: x.view(batch_size, -1, self.nb_head, self.head_dim).transpose(1, 2)
+
+        # Flatten query and key values
+        qf = q.view(batch_size, q.shape[1], -1).transpose(1, 2)
+        kf = k.view(batch_size, k.shape[1], -1).transpose(1, 2)
+
+        # Apply attention over flatten and return query, key and value
+        q = reshape(self.fc_query(qf))
+        k = reshape(self.fc_key(kf)).transpose(2, 3)
+        v = reshape(self.fc_value(kf))
+
+        # Apply causal masking to resulting attention vector
+        attn = torch.matmul(q, k) / math.sqrt(self.head_dim)
+        mask, start_mask = causal_mask(height*width)
+        mask, start_mask = mask.type_as(q), start_mask.type_as(q)
+
+        attn = attn.masked_fill(mask == 0, -1e4)
+        attn = torch.softmax(attn, 3) * start_mask
+        attn = self.drop(attn)
+
+        # Query value using final attention probabilities
+        out = attn @ v
+        out = out.transpose(1, 2).reshape(batch_size, height, width, self.head_dim*self.nb_head).permute(0, 3, 1, 2)
+        return out
+
+# Ported from numpy to torch. lru_cache for memoisation of masks
+@lru_cache(maxsize=64)
+def causal_mask(size):
+    shape = [size, size]
+    mask = torch.triu(torch.ones(shape), diagonal=1).to(torch.uint8).t()
+    start_mask = torch.ones(size).to(torch.float32)
+    start_mask[0] = 0
+
+    return (
+        mask.unsqueeze(0),
+        start_mask.unsqueeze(1),
+    )
 
 class PixelBlock(nn.Module):
     def __init__(self):
@@ -86,12 +131,7 @@ class PixelSnail(nn.Module):
         return x
 
 if __name__ == "__main__":
-    x = torch.randn(1, 3, 4, 4)
-    blk = GatedResBlock(3, 8, 3, conv='wnconv2d', dropout=0.1)
-    print(blk(x).shape)
-    blk = GatedResBlock(3, 8, 3, conv='causal_downright', dropout=0.1)
-    print(blk(x).shape)
-    blk = GatedResBlock(3, 8, 3, conv='causal', dropout=0.1)
-    print(blk(x).shape)
-    blk = GatedResBlock(3, 8, 3, conv='causal', dropout=0.1, condition_dim=1)
-    print(blk(x, torch.randn(1,1,4,4)).shape)
+    attn = CausalAttention(3, 3, 8)
+    q = torch.randn(1, 3, 8, 8)
+    k = torch.randn(1, 3, 8, 8)
+    print(attn(q, k).shape)
