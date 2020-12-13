@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from functools import lru_cache
+from functools import lru_cache, partial
 
 # Inherits directly from nn.Conv2d and immediately normalises weights
 # TODO: May be worth trying kaiming normal or something
@@ -34,11 +34,35 @@ class CausalConv2d(nn.Module):
         return x
 
 class GatedResBlock(nn.Module):
-    def __init__(self):
+    def __init__(self, in_channel, channel, kernel_size, conv='wnconv2d', dropout=0.1, condition_dim=0):
         super().__init__()
 
-    def forward(self, x):
-        return x
+        assert conv in ['wnconv2d', 'causal_downright', 'causal'], "Invalid conv argument [wnconv2d, causal_downright, causal]"
+        # partial is amazing! should use more!
+        if conv == 'wnconv2d':
+            conv_builder = partial(WNConv2d, padding=kernel_size // 2)
+        elif conv == 'causal_downright':
+            conv_builder = partial(CausalConv2d, padding='downright')
+        elif conv == 'causal':
+            conv_builder = partial(CausalConv2d, padding='causal')
+
+        self.conv1 = conv_builder(in_channel, channel, kernel_size)
+        self.conv2 = conv_builder(channel, in_channel*2, kernel_size)
+        self.drop1 = nn.Dropout(dropout)
+
+        if condition_dim > 0:
+            self.convc = WNConv2d(condition_dim, in_channel*2, 1, bias=False)
+        self.gate = nn.GLU(1) # 0 -> 1 === ReZero -> Residual
+
+    def forward(self, x, c=None):
+        y = F.elu(self.conv1(F.elu(x)))
+        y = self.drop1(y)
+        y = self.conv2(y)
+
+        if c != None:
+            y = self.convc(c) + y
+        y = self.gate(y) + x
+        return y
 
 class CausalAttention(nn.Module):
     def __init__(self):
@@ -62,10 +86,12 @@ class PixelSnail(nn.Module):
         return x
 
 if __name__ == "__main__":
-    x = torch.randn(1, 1, 4, 4)
-    cconv1 = CausalConv2d(1, 8, 3, stride=1, padding='downright')
-    cconv2 = CausalConv2d(1, 8, 3, stride=1, padding='down')
-    cconv3 = CausalConv2d(1, 8, 3, stride=1, padding='causal')
-    print(cconv1(x).shape)
-    print(cconv2(x).shape)
-    print(cconv3(x).shape)
+    x = torch.randn(1, 3, 4, 4)
+    blk = GatedResBlock(3, 8, 3, conv='wnconv2d', dropout=0.1)
+    print(blk(x).shape)
+    blk = GatedResBlock(3, 8, 3, conv='causal_downright', dropout=0.1)
+    print(blk(x).shape)
+    blk = GatedResBlock(3, 8, 3, conv='causal', dropout=0.1)
+    print(blk(x).shape)
+    blk = GatedResBlock(3, 8, 3, conv='causal', dropout=0.1, condition_dim=1)
+    print(blk(x, torch.randn(1,1,4,4)).shape)
