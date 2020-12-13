@@ -18,7 +18,8 @@ if __name__ == "__main__":
     print(f"> Using device {device}")
 
     print(f"> Instantiating PixelSnail")
-    model = PixelSnail([28, 28], 256, 32, 5, 3, 2, 16, nb_out_res_block=2).to(device)
+    # model = PixelSnail([28, 28], 256, 32, 5, 3, 2, 16, nb_out_res_block=2).to(device)
+    model = PixelSnail([28, 28], 256, 32, 5, 3, 2, 16, nb_cond_res_block=2, cond_res_channel=16, nb_out_res_block=2).to(device)
     print(f"> Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}\n")
 
     print("> Loading dataset")
@@ -39,11 +40,12 @@ if __name__ == "__main__":
         eval_loss = 0.0
 
         model.train()
-        for x, _ in tqdm(train_loader):
+        for x, c in tqdm(train_loader):
             optim.zero_grad()
             x = (x*255).long().squeeze().to(device)
+            c = c.view(-1,1,1).expand(-1,7,7).to(device)
 
-            pred, _ = model(x)
+            pred, _ = model(x, c=c)
             loss = crit(pred.view(BATCH_SIZE, 256, -1), x.view(BATCH_SIZE, -1))
             train_loss += loss.item()
 
@@ -52,11 +54,12 @@ if __name__ == "__main__":
 
         model.eval()
         with torch.no_grad():
-            for i, (x, _) in enumerate(tqdm(test_loader)):
+            for i, (x, c) in enumerate(tqdm(test_loader)):
                 optim.zero_grad()
                 x = (x*255).long().squeeze().to(device)
+                c = c.view(-1,1,1).expand(-1,7,7).to(device)
 
-                pred, _ = model(x)
+                pred, _ = model(x, c=c)
                 loss = crit(pred.view(BATCH_SIZE, 256, -1), x.view(BATCH_SIZE, -1))
                 eval_loss += loss.item()
 
