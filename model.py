@@ -170,7 +170,9 @@ class PixelSnail(nn.Module):
         self.blks = nn.ModuleList([PixelBlock(channel, res_channel, kernel_size, nb_res_block, dropout=dropout, condition_dim=cond_res_channel) for _ in range(nb_pixel_block)])
         
         if nb_cond_res_block > 0:
-            pass
+            cond_net = [WNConv2d(nb_class, cond_res_channel, cond_res_kernel, padding=cond_res_kernel // 2)]
+            cond_net.extend([GatedResBlock(cond_res_channel, cond_res_channel, cond_res_kernel) for _ in range(nb_cond_res_block)])
+            self.cond_net = nn.Sequential(*cond_net)
 
         out = []
         for _ in range(nb_out_res_block):
@@ -203,7 +205,7 @@ class PixelSnail(nn.Module):
             else:
                 c = F.one_hot(c, self.nb_class).permute(0,3,1,2).type_as(self.bg)
                 c = self.cond_net(c)
-                c = F.interpolate(c, scale_factor=2) # TODO: Could have some tranposed Conv2d instead
+                c = F.interpolate(c, scale_factor=4) # TODO: Could have some tranposed Conv2d instead
                 cache['condition'] = c.detach().clone()
                 c = c[:, :, :height, :]
 
@@ -213,5 +215,11 @@ class PixelSnail(nn.Module):
         return y, cache
 
 if __name__ == "__main__":
-    ps = PixelSnail([24, 24], 512, 64, 7, 7, 2, 32, cond_res_channel=32, nb_out_res_block=5)
-    print(ps)
+    ps = PixelSnail([6, 6], 512, 64, 7, 7, 2, 32, cond_res_channel=32, nb_out_res_block=5)
+    x = torch.LongTensor(1, 6, 6).random_(0, 255)
+    print(ps(x)[0].shape)
+
+    x = torch.LongTensor(1, 24, 24).random_(0, 255)
+    c = torch.LongTensor(1, 6, 6).random_(0, 255)
+    ps = PixelSnail([24, 24], 512, 64, 7, 7, 2, 32, nb_cond_res_block=3, cond_res_channel=32, nb_out_res_block=5)
+    print(ps(x, c=c)[0].shape)
